@@ -1,0 +1,946 @@
+--[[
+    功能汇总（全部适配手机触摸操作）：
+    1. 飞行模式（手机：左侧滑动方向 + 右侧↑↓按钮；PC：WASD+空格/Ctrl）
+    2. 角色高亮（可自定义颜色、透明度）
+    3. 玩家ESP（名称、血量、距离、边框，单位：studs）
+    4. 龙卷风ESP（自动识别，显示距离，单位：studs）
+    5. 自杀/死亡（一键杀死角色，用于无法重置的服务器）
+    6. 自动农场（手机支持模拟触摸屏幕任意位置；PC支持模拟键盘按键）
+    7. Rayfield图形界面（按K键开关，完美支持触摸）
+    8. 配置自动保存
+--]]
+
+-- ==================== 加载 Rayfield ====================
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Window = Rayfield:CreateWindow({
+    Name = "RA",
+    LoadingTitle = "加载中...",
+    LoadingSubtitle = "请稍等",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "FlyScript",
+        FileName = "FlySettings"
+    },
+    KeySystem = false,
+})
+
+-- ==================== 创建标签页 ====================
+local FlyTab = Window:CreateTab("飞行控制", nil)
+local PlayerESPTab = Window:CreateTab("玩家ESP", nil)
+local TornadoESPTab = Window:CreateTab("龙卷风ESP", nil)
+local FarmTab = Window:CreateTab("自动农场", nil)
+local ToolsTab = Window:CreateTab("工具", nil)
+local SettingsTab = Window:CreateTab("设置", nil)
+
+-- ==================== 获取服务 ====================
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+-- ==================== 设备检测 ====================
+local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+-- ==================== 飞行配置 ====================
+local FLYING_SPEED = 50
+local VERTICAL_SPEED = 25
+
+-- ==================== 高亮配置 ====================
+local HIGHLIGHT_COLOR = Color3.fromRGB(0, 255, 255)
+local HIGHLIGHT_TRANSPARENCY = 0.5
+local currentHighlight = nil
+
+-- ==================== 飞行状态 ====================
+local isFlying = false
+local moveDirection = Vector3.new(0, 0, 0)
+local verticalMove = 0
+
+-- ==================== 玩家ESP 配置 ====================
+local PlayerESPEnabled = false
+local NameESPEnabled = false
+local HealthESPEnabled = false
+local DistanceESPEnabled = false
+local BoxESPEnabled = false
+local playerEspList = {}
+
+-- ==================== 龙卷风ESP 配置 ====================
+local TornadoESPEnabled = false
+local tornadoEspList = {}
+local tornadoObjects = {}
+
+-- ==================== 自动农场配置（支持键盘/触摸双模式）====================
+local FarmEnabled = false
+local FarmMode = isMobile and "Touch" or "Keyboard"   -- 手机默认触摸模式，PC默认键盘
+local FarmKey = Enum.KeyCode.E      -- 键盘模式下的按键
+local FarmTouchX = 0.5              -- 触摸模式点击位置X（屏幕百分比 0~1）
+local FarmTouchY = 0.5              -- 触摸模式点击位置Y
+local FarmInterval = 1.0
+local FarmRandomDelay = 0.2
+local farmConnection = nil
+
+-- ==================== 触摸滑动相关变量 ====================
+local activeTouch = nil
+local touchStartPos = nil
+local touchCurrentDir = Vector3.new(0, 0, 0)
+
+-- ==================== GUI 按钮（仅手机端显示）====================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "FlyMobileControls"
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+local touchAreaHint = Instance.new("Frame")
+touchAreaHint.Size = UDim2.new(0, 200, 0, 200)
+touchAreaHint.Position = UDim2.new(0, 10, 1, -210)
+touchAreaHint.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+touchAreaHint.BackgroundTransparency = 0.7
+touchAreaHint.BorderSizePixel = 0
+touchAreaHint.Visible = isMobile
+touchAreaHint.Parent = screenGui
+
+local touchHintText = Instance.new("TextLabel")
+touchHintText.Size = UDim2.new(1, 0, 1, 0)
+touchHintText.BackgroundTransparency = 1
+touchHintText.Text = "← 拖拽滑动 →"
+touchHintText.TextColor3 = Color3.fromRGB(255, 255, 255)
+touchHintText.TextScaled = true
+touchHintText.Font = Enum.Font.Gothom
+touchHintText.Parent = touchAreaHint
+
+local upButton = Instance.new("TextButton")
+upButton.Size = UDim2.new(0, 80, 0, 80)
+upButton.Position = UDim2.new(1, -190, 1, -210)
+upButton.BackgroundColor3 = Color3.fromRGB(0, 150, 255)
+upButton.BackgroundTransparency = 0.3
+upButton.Text = "⬆"
+upButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+upButton.TextScaled = true
+upButton.Font = Enum.Font.GothomBold
+upButton.BorderSizePixel = 0
+upButton.Visible = isMobile
+upButton.Parent = screenGui
+
+local downButton = Instance.new("TextButton")
+downButton.Size = UDim2.new(0, 80, 0, 80)
+downButton.Position = UDim2.new(1, -100, 1, -210)
+downButton.BackgroundColor3 = Color3.fromRGB(255, 100, 0)
+downButton.BackgroundTransparency = 0.3
+downButton.Text = "⬇"
+downButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+downButton.TextScaled = true
+downButton.Font = Enum.Font.GothomBold
+downButton.BorderSizePixel = 0
+downButton.Visible = isMobile
+downButton.Parent = screenGui
+
+-- ==================== 辅助函数 ====================
+local function getCharacter()
+    local char = player.Character
+    if not char then return nil, nil, nil end
+    return char, char:FindFirstChild("Humanoid"), char:FindFirstChild("HumanoidRootPart")
+end
+
+local function notify(title, content)
+    Rayfield:Notify({
+        Title = title,
+        Content = content,
+        Duration = 3,
+    })
+end
+
+-- 高亮
+local function applyHighlight(character)
+    if currentHighlight then currentHighlight:Destroy() end
+    local highlight = Instance.new("Highlight")
+    highlight.FillColor = HIGHLIGHT_COLOR
+    highlight.FillTransparency = HIGHLIGHT_TRANSPARENCY
+    highlight.OutlineColor = Color3.new(1, 1, 1)
+    highlight.OutlineTransparency = 0.3
+    highlight.Parent = character
+    currentHighlight = highlight
+end
+
+local function removeHighlight()
+    if currentHighlight then
+        currentHighlight:Destroy()
+        currentHighlight = nil
+    end
+end
+
+-- ==================== 死亡/自杀功能 ====================
+local function killCharacter()
+    local char = player.Character
+    if char then
+        char:BreakJoints()
+        local humanoid = char:FindFirstChild("Humanoid")
+        if humanoid then
+            humanoid.Health = 0
+        end
+        notify("⚠️ 自杀", "角色已死亡，即将重生")
+    else
+        notify("错误", "没有找到当前角色")
+    end
+end
+
+-- ==================== 自动农场核心功能（支持键盘和触摸）====================
+-- 模拟键盘按键
+local function simulateKeyPress(keyCode)
+    VirtualInputManager:SendKeyEvent(true, keyCode, false, nil)
+    task.wait(0.05)
+    VirtualInputManager:SendKeyEvent(false, keyCode, false, nil)
+end
+
+-- 模拟触摸点击（屏幕百分比坐标）
+local function simulateTouchPress(xPercent, yPercent)
+    local viewportSize = camera.ViewportSize
+    local x = viewportSize.X * xPercent
+    local y = viewportSize.Y * yPercent
+    -- 按下
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, Enum.UserInputType.Touch, nil, 0)
+    task.wait(0.05)
+    -- 抬起
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, Enum.UserInputType.Touch, nil, 0)
+end
+
+-- 启动自动农场循环
+local function startFarm()
+    if farmConnection then
+        farmConnection:Disconnect()
+        farmConnection = nil
+    end
+    if not FarmEnabled then return end
+
+    local lastTime = tick()
+    farmConnection = RunService.Stepped:Connect(function()
+        if not FarmEnabled then return end
+        local now = tick()
+        local intervalWithRandom = FarmInterval + (math.random() * 2 - 1) * FarmRandomDelay
+        if intervalWithRandom < 0.1 then intervalWithRandom = 0.1 end
+        if now - lastTime >= intervalWithRandom then
+            lastTime = now
+            if FarmMode == "Keyboard" then
+                simulateKeyPress(FarmKey)
+            else  -- Touch mode
+                simulateTouchPress(FarmTouchX, FarmTouchY)
+            end
+        end
+    end)
+end
+
+local function stopFarm()
+    if farmConnection then
+        farmConnection:Disconnect()
+        farmConnection = nil
+    end
+end
+
+local function restartFarm()
+    if FarmEnabled then
+        startFarm()
+    else
+        stopFarm()
+    end
+end
+
+-- ==================== 玩家ESP 功能 ====================
+local function createPlayerESP(targetPlayer)
+    if targetPlayer == player then return end
+    local character = targetPlayer.Character
+    if not character then return end
+    local head = character:FindFirstChild("Head")
+    if not head then return end
+
+    if playerEspList[targetPlayer] then
+        playerEspList[targetPlayer]:Destroy()
+        playerEspList[targetPlayer] = nil
+    end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "PlayerESP"
+    billboard.Adornee = head
+    billboard.Size = UDim2.new(0, 200, 0, 60)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = head
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Size = UDim2.new(1, 0, 1, 0)
+    mainFrame.BackgroundTransparency = 1
+    mainFrame.Parent = billboard
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Name = "NameLabel"
+    nameLabel.Size = UDim2.new(1, 0, 0.4, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = targetPlayer.DisplayName
+    nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nameLabel.TextScaled = true
+    nameLabel.Font = Enum.Font.GothomBold
+    nameLabel.Parent = mainFrame
+
+    local healthLabel = Instance.new("TextLabel")
+    healthLabel.Name = "HealthLabel"
+    healthLabel.Size = UDim2.new(1, 0, 0.3, 0)
+    healthLabel.Position = UDim2.new(0, 0, 0.4, 0)
+    healthLabel.BackgroundTransparency = 1
+    healthLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
+    healthLabel.TextScaled = true
+    healthLabel.Font = Enum.Font.Gothom
+    healthLabel.Parent = mainFrame
+
+    local distanceLabel = Instance.new("TextLabel")
+    distanceLabel.Name = "DistanceLabel"
+    distanceLabel.Size = UDim2.new(1, 0, 0.3, 0)
+    distanceLabel.Position = UDim2.new(0, 0, 0.7, 0)
+    distanceLabel.BackgroundTransparency = 1
+    distanceLabel.TextColor3 = Color3.fromRGB(255, 255, 0)
+    distanceLabel.TextScaled = true
+    distanceLabel.Font = Enum.Font.Gothom
+    distanceLabel.Parent = mainFrame
+
+    local boxFrame = Instance.new("Frame")
+    boxFrame.Name = "BoxFrame"
+    boxFrame.Size = UDim2.new(1, 0, 1, 0)
+    boxFrame.BackgroundTransparency = 0.8
+    boxFrame.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+    boxFrame.BorderSizePixel = 2
+    boxFrame.BorderColor3 = Color3.fromRGB(255, 0, 0)
+    boxFrame.Visible = false
+    boxFrame.Parent = mainFrame
+
+    playerEspList[targetPlayer] = billboard
+
+    local function updateHealth()
+        local humanoid = character:FindFirstChild("Humanoid")
+        if humanoid then
+            local health = math.floor(humanoid.Health)
+            local maxHealth = humanoid.MaxHealth
+            local healthPercent = health / maxHealth
+            local healthColor = Color3.fromRGB(255 - (255 * healthPercent), 255 * healthPercent, 0)
+            healthLabel.TextColor3 = healthColor
+            healthLabel.Text = "❤️ " .. health .. "/" .. maxHealth
+        else
+            healthLabel.Text = "❤️ 已死亡"
+        end
+    end
+
+    local function updateDistance()
+        local rootPart = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        local targetRootPart = character:FindFirstChild("HumanoidRootPart")
+        if rootPart and targetRootPart then
+            local distance = (rootPart.Position - targetRootPart.Position).Magnitude
+            distanceLabel.Text = "📏 " .. math.floor(distance) .. " studs"
+        else
+            distanceLabel.Text = "📏 -- studs"
+        end
+    end
+
+    local function updateVisibility()
+        nameLabel.Visible = NameESPEnabled
+        healthLabel.Visible = HealthESPEnabled
+        distanceLabel.Visible = DistanceESPEnabled
+        boxFrame.Visible = BoxESPEnabled
+        billboard.Enabled = PlayerESPEnabled
+    end
+
+    local humanoid = character:FindFirstChild("Humanoid")
+    if humanoid then
+        humanoid.HealthChanged:Connect(updateHealth)
+    end
+    character:WaitForChild("Humanoid").HealthChanged:Connect(updateHealth)
+
+    local connection
+    connection = RunService.RenderStepped:Connect(function()
+        if not billboard.Parent then
+            connection:Disconnect()
+            return
+        end
+        if PlayerESPEnabled then
+            updateDistance()
+            updateVisibility()
+        else
+            billboard.Enabled = false
+        end
+    end)
+
+    updateHealth()
+    updateDistance()
+    updateVisibility()
+end
+
+local function refreshPlayerESP()
+    for targetPlayer, gui in pairs(playerEspList) do
+        if gui and gui.Parent then
+            gui:Destroy()
+        end
+    end
+    playerEspList = {}
+    if not PlayerESPEnabled then return end
+    for _, targetPlayer in pairs(Players:GetPlayers()) do
+        if targetPlayer ~= player then
+            if targetPlayer.Character then
+                createPlayerESP(targetPlayer)
+            end
+            targetPlayer.CharacterAdded:Connect(function()
+                createPlayerESP(targetPlayer)
+            end)
+        end
+    end
+end
+
+Players.PlayerAdded:Connect(function(newPlayer)
+    if newPlayer ~= player then
+        newPlayer.CharacterAdded:Connect(function()
+            createPlayerESP(newPlayer)
+        end)
+    end
+end)
+
+-- ==================== 龙卷风ESP 功能 ====================
+local function isTornadoObject(obj)
+    if not obj then return false end
+    local nameLower = obj.Name:lower()
+    if nameLower:find("tornado") or nameLower:find("storm") or nameLower:find("twister") or nameLower:find("龙卷风") then
+        return true
+    end
+    if obj.Parent and obj.Parent.Name:lower():find("tornado") then
+        return true
+    end
+    return false
+end
+
+local function getTornadoAttachPart(tornadoObj)
+    if tornadoObj:IsA("BasePart") then
+        return tornadoObj
+    elseif tornadoObj:IsA("Model") then
+        return tornadoObj.PrimaryPart or tornadoObj:FindFirstChild("HumanoidRootPart") or tornadoObj:FindFirstChild("Head") or tornadoObj:FindFirstChildWhichIsA("BasePart")
+    end
+    return nil
+end
+
+local function createTornadoESP(tornadoObj)
+    local attachPart = getTornadoAttachPart(tornadoObj)
+    if not attachPart then return nil end
+
+    if tornadoEspList[tornadoObj] then
+        tornadoEspList[tornadoObj].billboard:Destroy()
+        tornadoEspList[tornadoObj] = nil
+    end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "TornadoESP"
+    billboard.Adornee = attachPart
+    billboard.Size = UDim2.new(0, 200, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = attachPart
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Size = UDim2.new(1, 0, 1, 0)
+    mainFrame.BackgroundTransparency = 1
+    mainFrame.Parent = billboard
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Size = UDim2.new(1, 0, 0.5, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Text = "🌪️ 龙卷风"
+    nameLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
+    nameLabel.TextScaled = true
+    nameLabel.Font = Enum.Font.GothomBold
+    nameLabel.Parent = mainFrame
+
+    local distanceLabel = Instance.new("TextLabel")
+    distanceLabel.Size = UDim2.new(1, 0, 0.5, 0)
+    distanceLabel.Position = UDim2.new(0, 0, 0.5, 0)
+    distanceLabel.BackgroundTransparency = 1
+    distanceLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    distanceLabel.TextScaled = true
+    distanceLabel.Font = Enum.Font.Gothom
+    distanceLabel.Parent = mainFrame
+
+    local espData = {billboard = billboard, distanceLabel = distanceLabel, attachPart = attachPart}
+    tornadoEspList[tornadoObj] = espData
+    return espData
+end
+
+local function scanAndCreateTornadoESP()
+    for obj, data in pairs(tornadoEspList) do
+        if data.billboard then
+            data.billboard:Destroy()
+        end
+    end
+    tornadoEspList = {}
+    tornadoObjects = {}
+
+    if not TornadoESPEnabled then return end
+
+    local function search(container)
+        for _, obj in ipairs(container:GetChildren()) do
+            if isTornadoObject(obj) then
+                if not tornadoObjects[obj] then
+                    tornadoObjects[obj] = true
+                    createTornadoESP(obj)
+                end
+            elseif obj:IsA("Model") or obj:IsA("Folder") then
+                search(obj)
+            end
+        end
+    end
+    search(workspace)
+end
+
+local function updateTornadoESP()
+    if not TornadoESPEnabled then return end
+    local rootPart = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return end
+
+    for obj, data in pairs(tornadoEspList) do
+        if data.billboard and data.billboard.Parent and data.distanceLabel then
+            local attachPart = data.attachPart
+            if attachPart and attachPart.Parent then
+                local distance = (rootPart.Position - attachPart.Position).Magnitude
+                data.distanceLabel.Text = string.format("📏 %.1f studs", distance)
+                if distance < 50 then
+                    data.distanceLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+                elseif distance < 100 then
+                    data.distanceLabel.TextColor3 = Color3.fromRGB(255, 255, 0)
+                else
+                    data.distanceLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+                end
+            else
+                data.billboard:Destroy()
+                tornadoEspList[obj] = nil
+            end
+        end
+    end
+end
+
+local function startTornadoScanner()
+    while true do
+        task.wait(5)
+        if TornadoESPEnabled then
+            scanAndCreateTornadoESP()
+        end
+    end
+end
+task.spawn(startTornadoScanner)
+
+-- ==================== 飞行核心逻辑 ====================
+local function startFlight()
+    local char, humanoid, rootPart = getCharacter()
+    if not (char and humanoid and rootPart) then return end
+    humanoid.PlatformStand = true
+    isFlying = true
+    applyHighlight(char)
+    notify("飞行模式", "已开启")
+end
+
+local function stopFlight()
+    local char, humanoid, rootPart = getCharacter()
+    if char and humanoid then
+        humanoid.PlatformStand = false
+    end
+    moveDirection = Vector3.new(0, 0, 0)
+    verticalMove = 0
+    touchCurrentDir = Vector3.new(0, 0, 0)
+    isFlying = false
+    removeHighlight()
+    notify("飞行模式", "已关闭")
+end
+
+-- PC键盘输入
+local function onInputBegan(input, gameProcessed)
+    if gameProcessed or not isFlying or isMobile then return end
+    local key = input.KeyCode
+    if key == Enum.KeyCode.W then
+        moveDirection = moveDirection + Vector3.new(0, 0, -1)
+    elseif key == Enum.KeyCode.S then
+        moveDirection = moveDirection + Vector3.new(0, 0, 1)
+    elseif key == Enum.KeyCode.A then
+        moveDirection = moveDirection + Vector3.new(-1, 0, 0)
+    elseif key == Enum.KeyCode.D then
+        moveDirection = moveDirection + Vector3.new(1, 0, 0)
+    elseif key == Enum.KeyCode.Space then
+        verticalMove = verticalMove + 1
+    elseif key == Enum.KeyCode.LeftControl then
+        verticalMove = verticalMove - 1
+    end
+end
+
+local function onInputEnded(input)
+    if not isFlying or isMobile then return end
+    local key = input.KeyCode
+    if key == Enum.KeyCode.W then
+        moveDirection = moveDirection - Vector3.new(0, 0, -1)
+    elseif key == Enum.KeyCode.S then
+        moveDirection = moveDirection - Vector3.new(0, 0, 1)
+    elseif key == Enum.KeyCode.A then
+        moveDirection = moveDirection - Vector3.new(-1, 0, 0)
+    elseif key == Enum.KeyCode.D then
+        moveDirection = moveDirection - Vector3.new(1, 0, 0)
+    elseif key == Enum.KeyCode.Space then
+        verticalMove = verticalMove - 1
+    elseif key == Enum.KeyCode.LeftControl then
+        verticalMove = verticalMove + 1
+    end
+end
+
+-- 手机触摸
+local function handleTouchBegan(input, gameProcessed)
+    if gameProcessed or not isFlying or not isMobile then return end
+    if input.UserInputType == Enum.UserInputType.Touch then
+        local touchPos = input.Position
+        if touchPos.X < camera.ViewportSize.X / 2 then
+            if activeTouch == nil then
+                activeTouch = input
+                touchStartPos = touchPos
+                touchCurrentDir = Vector3.new(0, 0, 0)
+            end
+        end
+    end
+end
+
+local function handleTouchMoved(input, gameProcessed)
+    if gameProcessed or not isFlying or not isMobile then return end
+    if input.UserInputType == Enum.UserInputType.Touch and activeTouch == input then
+        local currentPos = input.Position
+        local delta = currentPos - touchStartPos
+        local maxDelta = 150
+        local dirX = math.clamp(delta.X / maxDelta, -1, 1)
+        local dirZ = math.clamp(delta.Y / maxDelta, -1, 1)
+        touchCurrentDir = Vector3.new(dirX, 0, -dirZ)
+        local intensity = math.max(math.abs(dirX), math.abs(dirZ))
+        touchAreaHint.BackgroundTransparency = 0.7 - intensity * 0.4
+    end
+end
+
+local function handleTouchEnded(input, gameProcessed)
+    if gameProcessed or not isFlying or not isMobile then return end
+    if input.UserInputType == Enum.UserInputType.Touch and activeTouch == input then
+        activeTouch = nil
+        touchStartPos = nil
+        touchCurrentDir = Vector3.new(0, 0, 0)
+        touchAreaHint.BackgroundTransparency = 0.7
+    end
+end
+
+local verticalHold = 0
+upButton.MouseButton1Down:Connect(function()
+    if not isFlying then return end
+    verticalHold = 1
+end)
+upButton.MouseButton1Up:Connect(function()
+    if verticalHold == 1 then verticalHold = 0 end
+end)
+downButton.MouseButton1Down:Connect(function()
+    if not isFlying then return end
+    verticalHold = -1
+end)
+downButton.MouseButton1Up:Connect(function()
+    if verticalHold == -1 then verticalHold = 0 end
+end)
+
+-- 移动更新
+local function updateFlight()
+    if not isFlying then return end
+    local char, humanoid, rootPart = getCharacter()
+    if not (char and humanoid and rootPart) then return end
+    local cam = workspace.CurrentCamera
+    local camCFrame = cam.CFrame
+    local move = Vector3.new(0, 0, 0)
+    if isMobile then
+        move = camCFrame:VectorToWorldSpace(touchCurrentDir) * FLYING_SPEED
+        move = move + Vector3.new(0, verticalHold * VERTICAL_SPEED, 0)
+    else
+        move = camCFrame:VectorToWorldSpace(moveDirection) * FLYING_SPEED
+        move = move + Vector3.new(0, verticalMove * VERTICAL_SPEED, 0)
+    end
+    rootPart.AssemblyLinearVelocity = move
+end
+
+-- 连接事件
+UserInputService.InputBegan:Connect(onInputBegan)
+UserInputService.InputEnded:Connect(onInputEnded)
+UserInputService.InputBegan:Connect(handleTouchBegan)
+UserInputService.InputChanged:Connect(handleTouchMoved)
+UserInputService.InputEnded:Connect(handleTouchEnded)
+RunService.RenderStepped:Connect(updateFlight)
+RunService.RenderStepped:Connect(updateTornadoESP)
+
+-- 角色重生
+player.CharacterAdded:Connect(function(newChar)
+    if isFlying then
+        task.wait(0.5)
+        local humanoid = newChar:FindFirstChild("Humanoid")
+        if humanoid then
+            humanoid.PlatformStand = true
+            applyHighlight(newChar)
+            notify("飞行模式", "已重新激活")
+        end
+    end
+end)
+
+-- ==================== Rayfield UI 控件 ====================
+-- 飞行控制
+FlyTab:CreateToggle({
+    Name = "飞行模式",
+    CurrentValue = false,
+    Flag = "FlyToggle",
+    Callback = function(value)
+        if value then startFlight() else stopFlight() end
+    end,
+})
+FlyTab:CreateSlider({
+    Name = "飞行速度 (studs/秒)",
+    Range = {10, 200},
+    Increment = 5,
+    Suffix = " studs/秒",
+    CurrentValue = FLYING_SPEED,
+    Flag = "FlySpeedSlider",
+    Callback = function(value) FLYING_SPEED = value end,
+})
+FlyTab:CreateSlider({
+    Name = "升降速度 (studs/秒)",
+    Range = {5, 100},
+    Increment = 5,
+    Suffix = " studs/秒",
+    CurrentValue = VERTICAL_SPEED,
+    Flag = "VerticalSpeedSlider",
+    Callback = function(value) VERTICAL_SPEED = value end,
+})
+
+-- 玩家ESP
+PlayerESPTab:CreateToggle({
+    Name = "玩家ESP 总开关",
+    CurrentValue = false,
+    Flag = "PlayerESPMain",
+    Callback = function(value)
+        PlayerESPEnabled = value
+        refreshPlayerESP()
+    end,
+})
+PlayerESPTab:CreateToggle({
+    Name = "显示玩家名称",
+    CurrentValue = false,
+    Flag = "NameESP",
+    Callback = function(value)
+        NameESPEnabled = value
+        for _, gui in pairs(playerEspList) do
+            local nameLabel = gui and gui:FindFirstChild("MainFrame") and gui.MainFrame:FindFirstChild("NameLabel")
+            if nameLabel then nameLabel.Visible = value end
+        end
+    end,
+})
+PlayerESPTab:CreateToggle({
+    Name = "显示血量",
+    CurrentValue = false,
+    Flag = "HealthESP",
+    Callback = function(value)
+        HealthESPEnabled = value
+        for _, gui in pairs(playerEspList) do
+            local healthLabel = gui and gui:FindFirstChild("MainFrame") and gui.MainFrame:FindFirstChild("HealthLabel")
+            if healthLabel then healthLabel.Visible = value end
+        end
+    end,
+})
+PlayerESPTab:CreateToggle({
+    Name = "显示距离 (studs)",
+    CurrentValue = false,
+    Flag = "DistanceESP",
+    Callback = function(value)
+        DistanceESPEnabled = value
+        for _, gui in pairs(playerEspList) do
+            local distanceLabel = gui and gui:FindFirstChild("MainFrame") and gui.MainFrame:FindFirstChild("DistanceLabel")
+            if distanceLabel then distanceLabel.Visible = value end
+        end
+    end,
+})
+PlayerESPTab:CreateToggle({
+    Name = "显示盒子边框",
+    CurrentValue = false,
+    Flag = "BoxESP",
+    Callback = function(value)
+        BoxESPEnabled = value
+        for _, gui in pairs(playerEspList) do
+            local boxFrame = gui and gui:FindFirstChild("MainFrame") and gui.MainFrame:FindFirstChild("BoxFrame")
+            if boxFrame then boxFrame.Visible = value end
+        end
+    end,
+})
+
+-- 龙卷风ESP
+TornadoESPTab:CreateToggle({
+    Name = "龙卷风ESP 开关",
+    CurrentValue = false,
+    Flag = "TornadoESP",
+    Callback = function(value)
+        TornadoESPEnabled = value
+        if value then
+            scanAndCreateTornadoESP()
+        else
+            for _, data in pairs(tornadoEspList) do
+                if data.billboard then data.billboard:Destroy() end
+            end
+            tornadoEspList = {}
+            tornadoObjects = {}
+        end
+    end,
+})
+TornadoESPTab:CreateParagraph({
+    Title = "龙卷风识别说明",
+    Content = "脚本会自动识别名称中包含 tornado、storm、twister、龙卷风 的对象。\n如果游戏中的龙卷风使用其他名称，可以手动修改脚本中的 isTornadoObject 函数。",
+})
+
+-- ==================== 自动农场标签页（手机适配版）====================
+-- 模式选择
+local modeOptions = {"键盘模式", "触摸模式"}
+FarmTab:CreateDropdown({
+    Name = "输入模式",
+    Options = modeOptions,
+    CurrentOption = (FarmMode == "Keyboard") and "键盘模式" or "触摸模式",
+    Flag = "FarmMode",
+    Callback = function(option)
+        FarmMode = (option == "键盘模式") and "Keyboard" or "Touch"
+        if FarmEnabled then
+            restartFarm()
+        end
+        -- 动态显示/隐藏相关控件（Rayfield 没有原生隐藏，我们靠用户手动刷新，但可以通过设置 Flag 存储值）
+        notify("自动农场", "已切换至 " .. option)
+    end,
+})
+
+-- 键盘模式专用：按键选择
+local keyOptions = {"E", "F", "G", "R", "T", "Q", "LeftMouse", "RightMouse", "Space", "LeftControl"}
+local keyMap = {
+    E = Enum.KeyCode.E,
+    F = Enum.KeyCode.F,
+    G = Enum.KeyCode.G,
+    R = Enum.KeyCode.R,
+    T = Enum.KeyCode.T,
+    Q = Enum.KeyCode.Q,
+    LeftMouse = Enum.KeyCode.ButtonL,
+    RightMouse = Enum.KeyCode.ButtonR,
+    Space = Enum.KeyCode.Space,
+    LeftControl = Enum.KeyCode.LeftControl,
+}
+FarmTab:CreateDropdown({
+    Name = "键盘按键",
+    Options = keyOptions,
+    CurrentOption = "E",
+    Flag = "FarmKeyDropdown",
+    Callback = function(option)
+        FarmKey = keyMap[option] or Enum.KeyCode.E
+        if FarmEnabled and FarmMode == "Keyboard" then
+            restartFarm()
+            notify("自动农场", "按键已改为 " .. option)
+        end
+    end,
+})
+
+-- 触摸模式专用：X坐标滑块
+FarmTab:CreateSlider({
+    Name = "触摸 X 坐标 (%)",
+    Range = {0, 100},
+    Increment = 5,
+    Suffix = "%",
+    CurrentValue = FarmTouchX * 100,
+    Flag = "FarmTouchX",
+    Callback = function(value)
+        FarmTouchX = value / 100
+        if FarmEnabled and FarmMode == "Touch" then
+            -- 无需重启，下次点击会使用新坐标
+        end
+    end,
+})
+
+-- 触摸模式专用：Y坐标滑块
+FarmTab:CreateSlider({
+    Name = "触摸 Y 坐标 (%)",
+    Range = {0, 100},
+    Increment = 5,
+    Suffix = "%",
+    CurrentValue = FarmTouchY * 100,
+    Flag = "FarmTouchY",
+    Callback = function(value)
+        FarmTouchY = value / 100
+        if FarmEnabled and FarmMode == "Touch" then
+            -- 无需重启
+        end
+    end,
+})
+
+-- 通用设置：间隔、随机延迟
+FarmTab:CreateSlider({
+    Name = "点击间隔 (秒)",
+    Range = {0.2, 5},
+    Increment = 0.1,
+    Suffix = " 秒",
+    CurrentValue = FarmInterval,
+    Flag = "FarmInterval",
+    Callback = function(value)
+        FarmInterval = value
+        if FarmEnabled then
+            restartFarm()
+        end
+    end,
+})
+
+FarmTab:CreateSlider({
+    Name = "随机延迟 (±秒)",
+    Range = {0, 0.5},
+    Increment = 0.05,
+    Suffix = " 秒",
+    CurrentValue = FarmRandomDelay,
+    Flag = "FarmRandomDelay",
+    Callback = function(value)
+        FarmRandomDelay = value
+        if FarmEnabled then
+            restartFarm()
+        end
+    end,
+})
+
+-- 总开关放在最后，避免设置时频繁重启
+FarmTab:CreateToggle({
+    Name = "启用自动农场",
+    CurrentValue = false,
+    Flag = "FarmToggle",
+    Callback = function(value)
+        FarmEnabled = value
+        if value then
+            startFarm()
+            local modeText = (FarmMode == "Keyboard") and "键盘按键" or "触摸屏幕"
+            local detail = (FarmMode == "Keyboard") and tostring(FarmKey):gsub("Enum.KeyCode.", "") or string.format("(%.0f%%, %.0f%%)", FarmTouchX*100, FarmTouchY*100)
+            notify("自动农场", string.format("已启用 (%s %s)，间隔 %.1f 秒", modeText, detail, FarmInterval))
+        else
+            stopFarm()
+            notify("自动农场", "已禁用")
+        end
+    end,
+})
+
+FarmTab:CreateParagraph({
+    Title = "📱 手机使用说明",
+    Content = "• 键盘模式：模拟物理按键（需要蓝牙键盘或PC）\n• 触摸模式：自动点击屏幕指定位置（推荐手机使用）\n• 调整 X/Y 坐标可以点击游戏中的按钮区域\n• 建议先手动点击一下目标位置，记下大致百分比，再设置\n• 随机延迟可降低被检测风险",
+})
+
+-- ==================== 工具标签页 ====================
+ToolsTab:CreateButton({
+    Name = "💀 自杀 / 死亡 💀",
+    Callback = function()
+        killCharacter()
+    end,
+})
+ToolsTab:CreateParagraph({
+    Title = "⚠️ 说明",
+    Content = "当游戏禁用了角色重置功能时，可以使用此按钮强制自杀。\n点击后当前角色会立刻死亡并重生。",
+})
+
+-- 设置
+SettingsTab:CreateColorPicker({
+    Name = "高亮颜色",
+    CurrentValue = HIGHLIGHT_COLOR,
+    Flag = "HighlightColor",
+    Callback = function(color)
+        HIGH
